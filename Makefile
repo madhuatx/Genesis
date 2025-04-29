@@ -1,4 +1,8 @@
-.PHONY: clean clean-test clean-pyc clean-build docs help
+SHELL=/bin/bash
+C_RED = $(shell echo -e "\\033[0;31m")
+C_RESET = $(shell echo -e "\\033[0m")
+
+.PHONY: build venv nv-venv clean clean-test clean-pyc clean-build docs help
 .DEFAULT_GOAL := help
 
 define BROWSER_PYSCRIPT
@@ -26,10 +30,11 @@ BROWSER := python -c "$$BROWSER_PYSCRIPT"
 help:
 	@python -c "$$PRINT_HELP_PYSCRIPT" < $(MAKEFILE_LIST)
 
-clean: clean-build clean-pyc clean-test ## remove all build, test, coverage, and Python artifacts
+clean: clean-env clean-build clean-pyc clean-test ## remove all build, test, coverage, and Python artifacts
 
 clean-env: ## remove env artifacts
 	rm -fr env/
+	rm -fr venv/
 
 clean-build: ## remove build artifacts
 	rm -fr build/
@@ -49,6 +54,11 @@ clean-test: ## remove test and coverage artifacts
 	rm -f .coverage
 	rm -fr htmlcov/
 	rm -fr .pytest_cache
+
+clean-logs: ## remove *.csv, *.log and *.json artifacts
+	rm -fr *.csv
+	rm -fr *.json
+	rm -fr *.log
 
 lint: ## check style with flake8
 	flake8 genre tests
@@ -76,16 +86,33 @@ docs: ## generate Sphinx HTML documentation, including API docs
 servedocs: docs ## compile the docs watching for changes
 	watchmedo shell-command -p '*.rst' -c '$(MAKE) -C docs html' -R -D .
 
-release: dist ## package and upload a release
-	twine upload dist/*
-
-dist: clean ## builds source and wheel package
-	python setup.py sdist
-	python setup.py bdist_wheel
+build:  ## builds source and wheel package
+	python -m build
 	ls -l dist
 
-install: clean init ## install the package to the active Python's site-packages
-	python setup.py install
+venv: clean ## create and initialize venv environment
+	@python3 -m venv ./venv
+	source venv/bin/activate; \
+	pip install --no-input --upgrade pip; \
+	pip install --no-input -e .[dev]; \
+	./setenv.sh
+	@echo
+	@echo "********************* Activate your environment ***********************"
+	@echo
+	@echo "Please activate your environment with: "
+	@echo "$(C_RED)source venv/bin/activate$(C_RESET)"
+	@echo
+	@echo "***********************************************************************"
 
-init: clean-env clean ## create and initialize conda environment
-	@conda env create --prefix ./env --file environment.yml
+nv-venv: clean ## create and initialize venv environment
+	@python3 -m venv ./venv
+	source venv/bin/activate; \
+	pip install --no-input --upgrade pip; \
+	pip install --no-input -e .[dev]
+	@echo
+	@echo "********************* Activate your environment ***********************"
+	@echo
+	@echo "Please activate your environment with: "
+	@echo "$(C_RED)source venv/bin/activate$(C_RESET)"
+	@echo
+	@echo "***********************************************************************"
