@@ -5,11 +5,13 @@ import os
 import shutil
 import sys
 import time
+import threading
 from threading import Event, RLock, Semaphore, Thread
 
 import imageio
 import numpy as np
 import OpenGL
+from OpenGL.GL import *
 
 import genesis as gs
 
@@ -61,6 +63,9 @@ from .shader_program import ShaderProgram, ShaderProgramCache
 from .trackball import Trackball
 
 pyglet.options["shadow_window"] = False
+
+
+MODULE_DIR = os.path.dirname(__file__)
 
 
 class Viewer(pyglet.window.Window):
@@ -390,7 +395,7 @@ class Viewer(pyglet.window.Window):
         # because all access to the OpenGL context must be done from the thread that created it in the first place. As
         # a result, the logic for catching an invalid OpenGL context must be implemented at the thread-level.
         self.auto_start = auto_start
-        if self.run_in_thread:
+        if self._run_in_thread:
             self._initialized_event.clear()
             self._thread = Thread(target=self.start, daemon=True)
             self._thread.start()
@@ -534,10 +539,16 @@ class Viewer(pyglet.window.Window):
         This function will wait for the actual close, so you immediately
         manipulate the scene afterwards.
         """
-        self.on_close()
-        if self.run_in_thread:
-            while self._is_active:
+        if self._run_in_thread:
+            self._is_active = False
+            while self._thread.is_alive():
                 time.sleep(1.0 / self.viewer_flags["refresh_rate"])
+        else:
+            viewer_thread = self._thread or threading.main_thread()
+            if viewer_thread != threading.current_thread():
+                raise RuntimeError("'Viewer.close' can only be called from the thread that started the viewer.")
+
+            self.on_close()
 
     def save_video(self, filename=None):
         """Save the stored frames to a video file.
@@ -554,11 +565,13 @@ class Viewer(pyglet.window.Window):
             a file dialog will be opened to ask the user where
             to save the video file.
         """
+        self.video_recorder.close()
         if filename is None:
             filename = self._get_save_filename(["mp4"])
-
-        self.video_recorder.close()
-        shutil.move(self.video_recorder.filename, filename)
+        if filename is None:
+            os.remove(self.video_recorder.filename)
+        else:
+            shutil.move(self.video_recorder.filename, filename)
 
     def on_close(self):
         """Exit the event loop when the window is closed."""
@@ -566,21 +579,19 @@ class Viewer(pyglet.window.Window):
         if not self._initialized_event.is_set():
             self._initialized_event.set()
 
-        # Early return if already closed
-        if not self._is_active:
-            return
-
-        # Do not consider the viewer as active right away
+        # Do not consider the viewer as active anymore
         self._is_active = False
 
         # Remove our camera and restore the prior one
         try:
             if self._camera_node is not None:
                 self.scene.remove_node(self._camera_node)
+            self._camera_node = None
         except Exception:
             pass
         if self._prior_main_camera_node is not None:
             self.scene.main_camera_node = self._prior_main_camera_node
+        self._prior_main_camera_node = None
 
         # Delete any lighting nodes that we've attached
         if self.viewer_flags["use_raymond_lighting"]:
@@ -604,7 +615,10 @@ class Viewer(pyglet.window.Window):
             pass
         finally:
             super().on_close()
-            pyglet.app.exit()
+            try:
+                pyglet.app.exit()
+            except:
+                pass
 
         self._offscreen_result_semaphore.release()
 
@@ -614,7 +628,7 @@ class Viewer(pyglet.window.Window):
         if depth:
             self.render_flags["depth"] = True
         self.pending_offscreen_camera = (camera_node, render_target, normal)
-        if self.run_in_thread:
+        if self._run_in_thread:
             # send_offscreen_request
             self._offscreen_event.set()
             # wait_for_offscreen
@@ -639,7 +653,7 @@ class Viewer(pyglet.window.Window):
         if self.pending_offscreen_camera is None:
             return
 
-        if self.run_in_thread:
+        if self._run_in_thread:
             self.render_lock.acquire()
 
         # Make OpenGL context current
@@ -656,7 +670,7 @@ class Viewer(pyglet.window.Window):
         self.render_flags["offscreen"] = False
         self._offscreen_result_semaphore.release()
 
-        if self.run_in_thread:
+        if self._run_in_thread:
             self.render_lock.release()
 
     def on_draw(self):
@@ -664,7 +678,7 @@ class Viewer(pyglet.window.Window):
         if self._renderer is None:
             return
 
-        if self.run_in_thread or not self.auto_start:
+        if self._run_in_thread or not self.auto_start:
             self.render_lock.acquire()
 
         # Make OpenGL context current
@@ -719,7 +733,7 @@ class Viewer(pyglet.window.Window):
                     align=caption["location"],
                 )
 
-        if self.run_in_thread or not self.auto_start:
+        if self._run_in_thread or not self.auto_start:
             self.render_lock.release()
 
     def on_resize(self, width, height):
@@ -1013,7 +1027,7 @@ class Viewer(pyglet.window.Window):
         except Exception:
             return None
 
-        if filename == ():
+        if not filename:
             return None
         return filename
 
@@ -1065,66 +1079,65 @@ class Viewer(pyglet.window.Window):
         elif self.scene.has_node(self._direct_light):
             self.scene.remove_node(self._direct_light)
 
-        if normal:
+        flags = RenderFlags.NONE
+        if self.render_flags["flip_wireframe"]:
+            flags |= RenderFlags.FLIP_WIREFRAME
+        elif self.render_flags["all_wireframe"]:
+            flags |= RenderFlags.ALL_WIREFRAME
+        elif self.render_flags["all_solid"]:
+            flags |= RenderFlags.ALL_SOLID
 
+        if self.render_flags["shadows"]:
+            flags |= RenderFlags.SHADOWS_ALL
+        if self.render_flags["plane_reflection"]:
+            flags |= RenderFlags.REFLECTIVE_FLOOR
+        if self.render_flags["env_separate_rigid"]:
+            flags |= RenderFlags.ENV_SEPARATE
+        if self.render_flags["vertex_normals"]:
+            flags |= RenderFlags.VERTEX_NORMALS
+        if self.render_flags["face_normals"]:
+            flags |= RenderFlags.FACE_NORMALS
+        if not self.render_flags["cull_faces"]:
+            flags |= RenderFlags.SKIP_CULL_FACES
+
+        if self.render_flags["offscreen"]:
+            flags |= RenderFlags.OFFSCREEN
+
+        seg_node_map = None
+        if self.render_flags["seg"]:
+            flags |= RenderFlags.SEG
+            seg_node_map = self._seg_node_map
+
+        if self.render_flags["depth"]:
+            flags |= RenderFlags.RET_DEPTH
+
+        retval = renderer.render(self.scene, flags, seg_node_map=seg_node_map)
+
+        if normal:
             class CustomShaderCache:
                 def __init__(self):
                     self.program = None
 
                 def get_program(self, vertex_shader, fragment_shader, geometry_shader=None, defines=None):
                     if self.program is None:
-                        absolute_path = os.path.abspath(__file__)
-                        print(absolute_path)
                         self.program = ShaderProgram(
-                            os.path.join(absolute_path.replace("viewer.py", ""), "shaders/mesh_normal.vert"),
-                            os.path.join(absolute_path.replace("viewer.py", ""), "shaders/mesh_normal.frag"),
+                            os.path.join(MODULE_DIR, "shaders/mesh_normal.vert"),
+                            os.path.join(MODULE_DIR, "shaders/mesh_normal.frag"),
                             defines=defines,
                         )
                     return self.program
 
+            old_cache = renderer._program_cache
             renderer._program_cache = CustomShaderCache()
 
             flags = RenderFlags.FLAT | RenderFlags.OFFSCREEN
             if self.render_flags["env_separate_rigid"]:
                 flags |= RenderFlags.ENV_SEPARATE
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+            normal_arr, _ = renderer.render(scene, flags, is_first_pass=False)
+            retval = retval + (normal_arr,)
 
-            retval = renderer.render(scene, flags)
-            renderer._program_cache = ShaderProgramCache()
-
-        else:
-            flags = RenderFlags.NONE
-            if self.render_flags["flip_wireframe"]:
-                flags |= RenderFlags.FLIP_WIREFRAME
-            elif self.render_flags["all_wireframe"]:
-                flags |= RenderFlags.ALL_WIREFRAME
-            elif self.render_flags["all_solid"]:
-                flags |= RenderFlags.ALL_SOLID
-
-            if self.render_flags["shadows"]:
-                flags |= RenderFlags.SHADOWS_ALL
-            if self.render_flags["plane_reflection"]:
-                flags |= RenderFlags.REFLECTIVE_FLOOR
-            if self.render_flags["env_separate_rigid"]:
-                flags |= RenderFlags.ENV_SEPARATE
-            if self.render_flags["vertex_normals"]:
-                flags |= RenderFlags.VERTEX_NORMALS
-            if self.render_flags["face_normals"]:
-                flags |= RenderFlags.FACE_NORMALS
-            if not self.render_flags["cull_faces"]:
-                flags |= RenderFlags.SKIP_CULL_FACES
-
-            if self.render_flags["offscreen"]:
-                flags |= RenderFlags.OFFSCREEN
-
-            seg_node_map = None
-            if self.render_flags["seg"]:
-                flags |= RenderFlags.SEG
-                seg_node_map = self._seg_node_map
-
-            if self.render_flags["depth"]:
-                flags |= RenderFlags.RET_DEPTH
-
-            retval = renderer.render(self.scene, flags, seg_node_map=seg_node_map)
+            renderer._program_cache = old_cache
 
         if camera_node is not None:
             self.scene.main_camera_node = saved_camera_node
@@ -1179,7 +1192,7 @@ class Viewer(pyglet.window.Window):
                 pass
 
         if not self.context:
-            raise ValueError("Unable to initialize an OpenGL 3+ context")
+            raise RuntimeError("Unable to initialize an OpenGL 3+ context")
         clock.schedule_interval(Viewer._time_event, 1.0 / self.viewer_flags["refresh_rate"], self)
         self.switch_to()
         self.set_caption(self.viewer_flags["window_title"])
@@ -1206,7 +1219,12 @@ class Viewer(pyglet.window.Window):
         else:
             self.refresh()
 
-    def _run(self):
+    def run(self):
+        if self._run_in_thread:
+            raise RuntimeError("'Viewer.run' cannot be called manually if the viewer is already running in thread.")
+        elif threading.main_thread() != threading.current_thread():
+            raise RuntimeError("'Viewer.run' can only be called manually from main thread on MacOS.")
+
         while self._is_active:
             try:
                 self.refresh()
@@ -1215,6 +1233,10 @@ class Viewer(pyglet.window.Window):
                 self.on_close()
 
     def refresh(self):
+        viewer_thread = self._thread or threading.main_thread()
+        if viewer_thread != threading.current_thread():
+            raise RuntimeError("'Viewer.refresh' can only be called from the thread that started the viewer.")
+
         time_next_frame = time.time() + 1.0 / self.viewer_flags["refresh_rate"]
         while self._offscreen_event.wait(time_next_frame - time.time()):
             self.draw_offscreen()

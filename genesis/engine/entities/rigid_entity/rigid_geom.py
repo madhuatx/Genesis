@@ -6,11 +6,11 @@ import numpy as np
 import skimage
 import taichi as ti
 import torch
+import trimesh
 
 import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
-from genesis.ext import trimesh
 from genesis.repr_base import RBC
 from genesis.utils.misc import tensor_to_array
 
@@ -37,6 +37,8 @@ class RigidGeom(RBC):
         init_pos,
         init_quat,
         needs_coup,
+        contype,
+        conaffinity,
         center_init=None,
         data=None,
     ):
@@ -52,6 +54,8 @@ class RigidGeom(RBC):
         self._friction = friction
         self._sol_params = sol_params
         self._needs_coup = needs_coup
+        self._contype = contype
+        self._conaffinity = conaffinity
         self._is_convex = mesh.is_convex
         self._cell_start = cell_start
         self._vert_start = vert_start
@@ -92,6 +96,14 @@ class RigidGeom(RBC):
             self._sdf_verts = np.array(self._init_verts)
             self._sdf_faces = np.array(self._init_faces)
 
+        if len(self._sdf_faces) > 50000:
+            mesh_descr = f"({mesh.metadata['mesh_path']})" if "mesh_path" in mesh.metadata else ""
+            gs.logger.warning(
+                "Beware that SDF pre-processing of mesh {mesh_descr} having more than 50000 vertices may take a very "
+                "long time (>10min) and require large RAM allocation (>20Gb). Please either enable convexify or "
+                "decimation. (see FileMorph options)"
+            )
+
         # collision mesh uses default color
         self._preprocess()
 
@@ -116,7 +128,7 @@ class RigidGeom(RBC):
                 with open(self._gsd_path, "rb") as file:
                     gsd_dict = pkl.load(file)
                 is_cached_loaded = True
-            except (EOFError, pkl.UnpicklingError):
+            except (EOFError, ModuleNotFoundError, pkl.UnpicklingError):
                 gs.logger.info("Ignoring corrupted cache.")
 
         if not is_cached_loaded:
@@ -127,20 +139,15 @@ class RigidGeom(RBC):
                 center = (upper + lower) / 2.0
 
                 # NOTE: sdf size is from the center of the lower voxel cell to the center of the upper voxel cell
-                # add padding
+                # add padding. Adjust the cell size to keep resolution within bounds.
                 padding_ratio = 0.2
                 grid_size = (upper - lower).max() * padding_ratio + (upper - lower)
-                sdf_res = np.ceil(grid_size / self._material.sdf_cell_size).astype(int) + 1
-
-                if sdf_res.max() > self._material.sdf_max_res:
-                    sdf_res = np.ceil(sdf_res * self._material.sdf_max_res / sdf_res.max()).astype(int)
-                    sdf_cell_size = grid_size.max() / (sdf_res.max() - 1)
-                elif sdf_res.max() < self._material.sdf_min_res:
-                    sdf_res = np.ceil(sdf_res * self._material.sdf_min_res / sdf_res.max()).astype(int)
-                    sdf_cell_size = grid_size.max() / (sdf_res.max() - 1)
-                else:
-                    sdf_cell_size = self._material.sdf_cell_size
-                sdf_res = np.clip(sdf_res, 3, None)
+                sdf_cell_size = gs.EPS + np.clip(
+                    self._material.sdf_cell_size,
+                    grid_size.max() / (self._material.sdf_max_res - 1),
+                    grid_size.min() / max(self._material.sdf_min_res - 1, 2),
+                )
+                sdf_res = np.ceil(grid_size / sdf_cell_size).astype(int) + 1
 
                 # round up to multiple of sdf_cell_size
                 grid_size = (sdf_res - 1) * sdf_cell_size
@@ -599,6 +606,27 @@ class RigidGeom(RBC):
         Get whether the geom needs coupling with other non-rigid entities.
         """
         return self._needs_coup
+
+    @property
+    def contype(self):
+        """
+        Get the contact type of the geometry for collision pair filtering.
+
+        The two geoms are deemed "compatible" (i.e. collisions between them is allowed) if the 'contype' of one geom
+        and the 'conaffinity' of the other geom have a common bit set to 1, i.e.
+        `(geom1.contype & geom2.conaffinity) || (geom2.contype & geom1.conaffinity) == True`. This is a powerful
+        mechanism borrowed from Open Dynamics Engine.
+        """
+        return self._contype
+
+    @property
+    def conaffinity(self):
+        """
+        Get the contact affinity of the geometry for collision pair filtering.
+
+        See `contype` documentation for details.
+        """
+        return self._conaffinity
 
     @property
     def coup_softness(self):
