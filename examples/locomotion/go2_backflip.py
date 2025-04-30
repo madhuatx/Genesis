@@ -111,7 +111,7 @@ def main():
     parser.add_argument("-e", "--exp_name", type=str, default="single")
     args = parser.parse_args()
 
-    gs.init()
+    gs.init(backend=gs.vulkan)
 
     env_cfg, obs_cfg, reward_cfg, command_cfg = get_cfgs()
 

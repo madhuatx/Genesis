@@ -12,8 +12,8 @@ def main():
     args = parser.parse_args()
 
     ########################## init ##########################
-    gs.init(backend=gs.cpu if args.cpu else gs.gpu, logging_level="debug")
-
+    # gs.init(backend=gs.cpu if args.cpu else gs.gpu, logging_level="debug")
+    gs.init(backend=gs.vulkan, logging_level="debug")
     ########################## create a scene ##########################
 
     scene = gs.Scene(
@@ -26,7 +26,7 @@ def main():
             camera_lookat=(0, 0, 0.5),
             camera_up=(0, 0, 1),
         ),
-        show_viewer=args.vis,
+        show_viewer=True,
     )
 
     ########################## materials ##########################

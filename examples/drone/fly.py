@@ -12,7 +12,7 @@ def main():
     args = parser.parse_args()
 
     ########################## init ##########################
-    gs.init(backend=gs.cpu)
+    gs.init(backend=gs.vulkan)
 
     ########################## create a scene ##########################
     viewer_options = gs.options.ViewerOptions(
