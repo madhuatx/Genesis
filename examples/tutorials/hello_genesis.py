@@ -1,8 +1,10 @@
 import genesis as gs
+import os
+os.environ['PYOPENGL_PLATFORM'] = 'glx'
 
-gs.init(backend=gs.cpu)
+gs.init(backend=gs.vulkan)
 
-scene = gs.Scene()
+scene = gs.Scene(show_viewer=True)
 
 plane = scene.add_entity(
     gs.morphs.Plane(),

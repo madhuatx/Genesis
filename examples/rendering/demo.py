@@ -1,6 +1,8 @@
 import torch
 
 import genesis as gs
+import os
+os.environ['PYOPENGL_PLATFORM'] = 'glx'
 
 
 def main():
